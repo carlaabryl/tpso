@@ -37,6 +37,8 @@ void release_lock(int client_socket);
 void load_config(char *ip, int *port, int *max_clients, int *backlog);
 char *execute_query(const char *command, int *is_success);
 char *perform_modification(const char *command, int *is_success);
+static void cleanup_resources(void);
+static void handle_termination_signal(int signum);
 
 // Estructura para pasar argumentos al hilo
 typedef struct {

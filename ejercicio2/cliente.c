@@ -67,6 +67,13 @@ int main(int argc, char const *argv[]) {
     printf("Conectado a %s:%d (Socket %d).\n", ip, port, sock);
     printf("Escriba 'HELP' o 'EXIT' para terminar.\n");
 
+    // Leer mensaje inicial de bienvenida del servidor (si lo hay)
+    memset(buffer, 0, MAX_BUFFER_SIZE);
+    int initread = read(sock, buffer, MAX_BUFFER_SIZE);
+    if (initread > 0) {
+        printf("<< %s", buffer);
+    }
+
     // Esto permite al cliente ser interactivo y mantenerse en un ciclo de consulta.
     while (1) {
         printf("DB > ");
