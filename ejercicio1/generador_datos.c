@@ -53,17 +53,18 @@ static volatile sig_atomic_t generadores_en_ejecucion = 0; // Cantidad de hijos 
 static int g_id_sem = -1;
 static int g_id_shm = -1;
 static DatosCompartidos *g_datos_compartidos = NULL;
-
+//Si el usuario presiona Ctrl+C, se detiene el programa
 static void manejador_sigint(int sig) {
     (void)sig;
     detener_solicitado = 1;
+    printf("\n[Señal] SIGINT recibida. Finalizando programa...\n");
 }
-
+//Si el usuario jace un kill-9 al programa, se detiene el programa
 static void manejador_sigterm(int sig) {
     (void)sig;
     detener_solicitado = 1;
 }
-
+//Si el hijo finaliza, se actualiza la cantidad de hijos vivos
 static void manejador_sigchld(int sig) {
     (void)sig;
     int status;
@@ -94,6 +95,21 @@ void proceso_generador(int id_shm, int id_sem, int id_generador) {
         exit(1);
     }
 
+    // Instalar manejador de señales para el generador
+    struct sigaction sa_int;
+    memset(&sa_int, 0, sizeof(sa_int));
+    sa_int.sa_handler = manejador_sigint;
+    sigemptyset(&sa_int.sa_mask);
+    sa_int.sa_flags = 0;
+    sigaction(SIGINT, &sa_int, NULL);
+
+    struct sigaction sa_term;
+    memset(&sa_term, 0, sizeof(sa_term));
+    sa_term.sa_handler = manejador_sigterm;
+    sigemptyset(&sa_term.sa_mask);
+    sa_term.sa_flags = 0;
+    sigaction(SIGTERM, &sa_term, NULL);
+
     srand(time(NULL) + getpid()); // Inicialización de semilla aleatoria por proceso
 
     int my_start_id = -1;
@@ -108,8 +124,8 @@ void proceso_generador(int id_shm, int id_sem, int id_generador) {
 
     // Bucle principal: generar registros mientras haya IDs disponibles
     while (1) {
-        // Salida temprana si el Coordinador indicó finalizar
-        if (shm_data->finalizado) {
+        // Salida temprana si el Coordinador indicó finalizar o se recibió señal
+        if (shm_data->finalizado || detener_solicitado) {
             break;
         }
         // 1. Solicitud y obtención de bloque de IDs
@@ -122,7 +138,7 @@ void proceso_generador(int id_shm, int id_sem, int id_generador) {
             // Verificar si quedan IDs para asignar
             if (next_available_id > shm_data->total_objetivo_registros) {
                 sem_senalizar(id_sem, SEM_ASIGNACION_ID);
-                break; // No quedan m�s registros por generar
+                break; // No quedan más registros por generar
             }
 
             my_start_id = next_available_id;
@@ -147,15 +163,15 @@ void proceso_generador(int id_shm, int id_sem, int id_generador) {
             // (el Coordinador haya procesado el registro anterior).
             sem_esperar(id_sem, SEM_DATOS_PROD_CONS);
 
-            if (shm_data->finalizado) {
-                // Si el Coordinador decidió finalizar, liberar y salir
+            if (shm_data->finalizado || detener_solicitado) {
+                // Si el Coordinador decidió finalizar o se recibió señal, liberar y salir
                 sem_senalizar(id_sem, SEM_DATOS_PROD_CONS);
                 break;
             }
 
             if (shm_data->hay_datos_disponibles) {
-                // Esto es una verificaci�n de seguridad, en un esquema de productor-consumidor simple
-                // el Generador no deber�a escribir si ya hay datos pendientes.
+                // Esto es una verificación de seguridad, en un esquema de productor-consumidor simple���//��
+                // el Generador no debería escribir si ya hay datos pendientes.
                 sem_senalizar(id_sem, SEM_DATOS_PROD_CONS);
                 continue;
             }
@@ -166,9 +182,9 @@ void proceso_generador(int id_shm, int id_sem, int id_generador) {
             shm_data->buffer_registro.cantidad = rand() % 100 + 1; // 1 a 100
             shm_data->buffer_registro.precio = (float)(rand() % 5000 + 100) / 100.0; // Precio entre 1.00 y 50.99
 
-            // Se�alar al Coordinador que hay un registro listo
-            // Esto permite al proceso Generador notificar al Coordinador que un nuevo registro
-            // est� disponible en la memoria compartida.
+            // Senialar al Coordinador que hay un registro listo
+            // Esto permite al proceso Generador notificar al Coordinador que un nuevo registro está disponible en la memoria compartida.
+             
             shm_data->hay_datos_disponibles = 1;
 
             printf("[Generador %d] Produjo ID %d.\n", id_generador, current_id);
@@ -177,14 +193,18 @@ void proceso_generador(int id_shm, int id_sem, int id_generador) {
 
             sem_senalizar(id_sem, SEM_DATOS_PROD_CONS);
 
-            // Peque�a espera para no monopolizar la CPU
+            // Pequeniaa espera para no monopolizar la CPU
             usleep(rand() % 100000); // 0 a 100ms
         } else {
-            // Ya se terminaron los IDs del bloque, el bucle lo detectar� al inicio para pedir uno nuevo.
+            // Ya se terminaron los IDs del bloque, el bucle lo detectará al inicio para pedir uno nuevo.
         }
     }
 
-    printf("[Generador %d] Finalizado. Detaching SHM.\n", id_generador);
+    if (detener_solicitado) {
+        printf("[Generador %d] Finalizado por señal. Detaching SHM.\n", id_generador);
+    } else {
+        printf("[Generador %d] Finalizado. Detaching SHM.\n", id_generador);
+    }
     // Informar al coordinador que este generador finaliza
     sem_esperar(id_sem, SEM_ASIGNACION_ID);
     shm_data->generadores_finalizados++;
@@ -193,7 +213,7 @@ void proceso_generador(int id_shm, int id_sem, int id_generador) {
     exit(0);
 }
 
-// --- Funcin para la l�gica del Coordinador
+// --- Funcion para la lógica del Coordinador
 void proceso_coordinador(int id_shm, int id_sem, int cantidad_generadores, int total_registros) {
     DatosCompartidos *shm_data = (DatosCompartidos *)shmat(id_shm, NULL, 0);
     if (shm_data == (void *)-1) {
@@ -291,7 +311,11 @@ void proceso_coordinador(int id_shm, int id_sem, int cantidad_generadores, int t
     }
 
     fclose(csv_file);
-    printf("[Coordinador] Finalizado. Total de registros generados: %d.\n", shm_data->total_registros_generados);
+    if (detener_solicitado) {
+        printf("[Coordinador] Finalizado por señal. Total de registros generados: %d.\n", shm_data->total_registros_generados);
+    } else {
+        printf("[Coordinador] Finalizado. Total de registros generados: %d.\n", shm_data->total_registros_generados);
+    }
 
     // Esperar a que todos los procesos generadores terminen
     int status;
