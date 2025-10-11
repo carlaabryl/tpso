@@ -113,14 +113,14 @@ void proceso_generador(int id_shm, int id_sem, int id_generador) {
             break;
         }
         // 1. Solicitud y obtención de bloque de IDs
-        if (current_id > my_end_id) {
+        if (current_id > my_end_id || current_id == -1) {
             // Esto permite al proceso Generador solicitar un nuevo bloque de 10 IDs al Coordinador.
             sem_esperar(id_sem, SEM_ASIGNACION_ID);
 
             int next_available_id = shm_data->proximo_id_a_asignar;
 
             // Verificar si quedan IDs para asignar
-            if (next_available_id >= shm_data->total_objetivo_registros) {
+            if (next_available_id > shm_data->total_objetivo_registros) {
                 sem_senalizar(id_sem, SEM_ASIGNACION_ID);
                 break; // No quedan m�s registros por generar
             }
@@ -129,8 +129,8 @@ void proceso_generador(int id_shm, int id_sem, int id_generador) {
             my_end_id = next_available_id + TAMANIO_BLOQUE_IDS - 1;
 
             // Ajustar el final del bloque si se excede el total
-            if (my_end_id >= shm_data->total_objetivo_registros) {
-                my_end_id = shm_data->total_objetivo_registros - 1;
+            if (my_end_id > shm_data->total_objetivo_registros) {
+                my_end_id = shm_data->total_objetivo_registros;
             }
 
             shm_data->proximo_id_a_asignar = my_end_id + 1;
@@ -238,7 +238,7 @@ void proceso_coordinador(int id_shm, int id_sem, int cantidad_generadores, int t
 
     // Esto permite al proceso Coordinador escribir los nombres de las columnas
     // en la primera l�nea del archivo CSV, cumpliendo con el requisito.
-    fprintf(csv_file, "ID,Producto,Cantidad,Precio\n");
+    fprintf(csv_file, "ID;Producto;Cantidad;Precio\n");
     printf("[Coordinador] Archivo CSV inicializado con encabezado.\n");
 
     // Bucle principal del Coordinador: recibir y escribir registros
@@ -248,7 +248,7 @@ void proceso_coordinador(int id_shm, int id_sem, int cantidad_generadores, int t
 
         if (shm_data->hay_datos_disponibles) {
             // Escribir el registro recibido en el archivo CSV
-            fprintf(csv_file, "%d,%s,%d,%.2f\n",
+            fprintf(csv_file, "%d;%s;%d;%.2f\n",
                     shm_data->buffer_registro.id,
                     shm_data->buffer_registro.nombre_producto,
                     shm_data->buffer_registro.cantidad,
@@ -337,7 +337,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Inicializaci�n de datos
-    shm_data->proximo_id_a_asignar = 0;
+    shm_data->proximo_id_a_asignar = 1;  // Empezar desde ID 1
     shm_data->total_registros_generados = 0;
     shm_data->total_objetivo_registros = total_registros;
     shm_data->hay_datos_disponibles = 0;
