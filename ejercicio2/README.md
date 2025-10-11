@@ -16,21 +16,23 @@ gcc cliente.c -o cliente
 
 ### Archivo CSV (base de datos)
 - Nombre por defecto: `registros_generados.csv`
-- Formato: `ID,Producto,Cantidad,Precio`
+- Formato: `ID;Producto;Cantidad;Precio` (separado por punto y coma)
 - Debe existir en el mismo directorio que el ejecutable del servidor.
 
 ### Ejecución
 - Servidor:
 ```
-./servidor                   # Usa IP/PUERTO/N/M por defecto (127.0.0.1:8080, N=5, M=5)
-./servidor N M               # Define N (concurrentes) y M (backlog)
-./servidor IP PUERTO N M     # Define IP, PUERTO, N y M
+./servidor                           # Usa valores por defecto (127.0.0.1:8080, N=5, M=5)
+./servidor N M                       # Configurar clientes concurrentes (N) y backlog (M)
+./servidor IP PUERTO N M             # Configurar IP, puerto, clientes concurrentes y backlog
 ```
 - Cliente:
 ```
-./cliente                    # Conecta a 127.0.0.1:8080
-./cliente IP PUERTO          # Conecta a la IP y PUERTO indicados
+./cliente                            # Conecta a servidor local (127.0.0.1:8080)
+./cliente IP PUERTO                  # Conecta a servidor específico
 ```
+
+**Nota:** Si se proporcionan parámetros incorrectos, ambos programas mostrarán ayuda automáticamente.
 
 Al conectarse, el servidor asigna y muestra un identificador: "Usuario N".
 
@@ -44,16 +46,18 @@ Comandos soportados (escribir y presionar Enter):
 
 - Transacciones y DML (requieren transacción activa):
   - `BEGIN TRANSACTION`
-  - `INSERT id,producto,cantidad,precio`
-    - Ej: `INSERT 100,Router,5,199.99`
+  - `INSERT id;producto;cantidad;precio`
+    - Ej: `INSERT 100;Router;5;199.99`
   - `UPDATE ID=<id> SET Campo=Valor`
     - Ej: `UPDATE ID=10 SET Precio=15.50`, `UPDATE ID=20 SET Cantidad=42`, `UPDATE ID=30 SET Producto=Mouse`
   - `DELETE ID=<id>`
   - `COMMIT TRANSACTION`
 
 - Control:
-  - `HELP` (lista comandos)
+  - `HELP` (lista comandos detallados con ejemplos)
   - `EXIT` (cierra la conexión del cliente)
+
+**Nota:** Si se ingresa un comando incorrecto, el servidor mostrará automáticamente la ayuda detallada.
 
 ### Reglas de concurrencia y bloqueo
 - `BEGIN TRANSACTION` toma un lock exclusivo sobre `registros_generados.csv`.
@@ -82,7 +86,7 @@ SELECT ALL
 2) Transacción con modificaciones:
 ```
 BEGIN TRANSACTION
-INSERT 100,Router,5,199.99
+INSERT 100;Router;5;199.99
 UPDATE ID=10 SET Precio=15.50
 DELETE ID=10
 COMMIT TRANSACTION
