@@ -22,6 +22,9 @@
 
 // --- Variables Globales de Estado
 volatile int clientes_activos = 0;
+#define MAX_TOTAL_CLIENTES 1024
+static int sockets_clientes[MAX_TOTAL_CLIENTES];
+static pthread_mutex_t mutex_sockets_clientes = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_clientes;
 int archivo_bloqueado = 0; // Estado: 1 si hay una transacción activa
 int bloqueado_por_socket = -1; // Socket del cliente que tiene el lock
@@ -106,8 +109,19 @@ void *handle_client(void *arg) {
     char buffer[MAX_COMMAND_LENGTH] = {0};
     int transaccion_activa = 0;
 
+
     printf("[THREAD %lu] Cliente conectado desde %s:%d\n",
            pthread_self(), inet_ntoa(info->direccion.sin_addr), ntohs(info->direccion.sin_port));
+
+    // Registrar socket en la lista global
+    pthread_mutex_lock(&mutex_sockets_clientes);
+    for (int i = 0; i < MAX_TOTAL_CLIENTES; ++i) {
+        if (sockets_clientes[i] == 0) {
+            sockets_clientes[i] = socket_cliente;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&mutex_sockets_clientes);
 
     // Enviar bienvenida con el identificador de usuario asignado
     char welcome[128];
@@ -261,6 +275,17 @@ void *handle_client(void *arg) {
         printf("[THREAD %lu] Lock liberado exitosamente. Otros clientes pueden realizar operaciones.\n", pthread_self());
     }
 
+
+    // Eliminar socket de la lista global
+    pthread_mutex_lock(&mutex_sockets_clientes);
+    for (int i = 0; i < MAX_TOTAL_CLIENTES; ++i) {
+        if (sockets_clientes[i] == socket_cliente) {
+            sockets_clientes[i] = 0;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&mutex_sockets_clientes);
+
     close(socket_cliente);
 
     // Esto permite al servidor manejar el conteo de clientes concurrentes (Requisito 1)
@@ -326,10 +351,12 @@ int main(int argc, char *argv[]) {
         if (config_backlog < 0) { fprintf(stderr, "ERROR: M (backlog) debe ser mayor o igual a 0. Valor recibido: %d\n", config_backlog); exit(EXIT_FAILURE); }
     }
 
+
     // Inicialización de mutexes
     pthread_mutex_init(&mutex_clientes, NULL);
     pthread_mutex_init(&mutex_estado_bloqueo, NULL);
     pthread_cond_init(&condicion_clientes, NULL);
+    memset(sockets_clientes, 0, sizeof(sockets_clientes));
 
     // Manejo de señales: evitar caídas por SIGPIPE y limpieza en SIGINT/SIGTERM
     signal(SIGPIPE, SIG_IGN);
@@ -339,6 +366,7 @@ int main(int argc, char *argv[]) {
     // Registrar limpieza en salida normal
     atexit(cleanup_resources);
 
+
     // Creación del socket del servidor
     socket_servidor = socket(AF_INET, SOCK_STREAM, 0);
     if (socket_servidor == 0) { perror("socket failed"); exit(EXIT_FAILURE); }
@@ -347,6 +375,11 @@ int main(int argc, char *argv[]) {
     int opt = 1;
     if (setsockopt(socket_servidor, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
         perror("setsockopt"); exit(EXIT_FAILURE);
+    }
+    // Habilitar SO_KEEPALIVE para detectar desconexiones colgadas
+    opt = 1;
+    if (setsockopt(socket_servidor, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt))) {
+        perror("setsockopt SO_KEEPALIVE");
     }
 
     direccion.sin_family = AF_INET;
@@ -701,56 +734,42 @@ char *perform_modification(const char *command, int *is_success) {
 }
 
 char *mostrar_ayuda_detallada(void) {
-    char *ayuda = (char *)malloc(4096);
+    char *ayuda = (char *)malloc(2048);
     if (!ayuda) return NULL;
-    snprintf(ayuda, 4096,
+    
+    snprintf(ayuda, 2048,
         "=== AYUDA - MICRO DB ===\n"
         "\n"
         "COMANDOS DE CONSULTA (no requieren transacción):\n"
-        "  SELECT ALL\n"
-        "    - Muestra todos los registros de la base de datos.\n"
-        "    Ejemplo: SELECT ALL\n"
-        "\n"
-        "  SELECT WHERE CAMPO=VALOR\n"
-        "    - Filtra registros según el campo y valor especificados.\n"
+        "  SELECT ALL                           - Mostrar todos los registros\n"
+        "  SELECT WHERE CAMPO=VALOR             - Filtrar registros\n"
         "    Campos disponibles: ID, Producto, Cantidad, Precio\n"
-        "    Ejemplo: SELECT WHERE Producto=Tablet\n"
-        "    Ejemplo: SELECT WHERE ID=10\n"
-        "    Ejemplo: SELECT WHERE Cantidad=50\n"
-        "    Ejemplo: SELECT WHERE Precio=25.99\n"
+        "    Ejemplos:\n"
+        "      SELECT WHERE Producto=Tablet\n"
+        "      SELECT WHERE ID=10\n"
+        "      SELECT WHERE Cantidad=50\n"
+        "      SELECT WHERE Precio=25.99\n"
         "\n"
         "COMANDOS DE TRANSACCIÓN:\n"
-        "  BEGIN TRANSACTION\n"
-        "    - Inicia una nueva transacción y obtiene lock exclusivo sobre el archivo.\n"
-        "    Ejemplo: BEGIN TRANSACTION\n"
-        "\n"
-        "  COMMIT TRANSACTION\n"
-        "    - Confirma la transacción y libera el lock exclusivo.\n"
-        "    Ejemplo: COMMIT TRANSACTION\n"
+        "  BEGIN TRANSACTION                    - Iniciar transacción (obtiene lock exclusivo)\n"
+        "  COMMIT TRANSACTION                   - Confirmar transacción (libera lock)\n"
         "\n"
         "COMANDOS DE MODIFICACIÓN (requieren transacción activa):\n"
-        "  INSERT id;producto;cantidad;precio\n"
-        "    - Inserta un nuevo registro en la base de datos.\n"
+        "  INSERT id;producto;cantidad;precio   - Insertar nuevo registro\n"
         "    Ejemplo: INSERT 100;Router;5;199.99\n"
         "\n"
-        "  UPDATE ID=<id> SET Campo=Valor\n"
-        "    - Actualiza el campo especificado del registro con el ID dado.\n"
-        "    Ejemplo: UPDATE ID=10 SET Precio=15.50\n"
-        "    Ejemplo: UPDATE ID=20 SET Cantidad=42\n"
-        "    Ejemplo: UPDATE ID=30 SET Producto=Mouse\n"
+        "  UPDATE ID=<id> SET Campo=Valor        - Actualizar registro existente\n"
+        "    Ejemplos:\n"
+        "      UPDATE ID=10 SET Precio=15.50\n"
+        "      UPDATE ID=20 SET Cantidad=42\n"
+        "      UPDATE ID=30 SET Producto=Mouse\n"
         "\n"
-        "  DELETE ID=<id>\n"
-        "    - Elimina el registro con el ID especificado.\n"
+        "  DELETE ID=<id>                       - Eliminar registro\n"
         "    Ejemplo: DELETE ID=10\n"
         "\n"
         "COMANDOS DE CONTROL:\n"
-        "  HELP\n"
-        "    - Muestra esta ayuda detallada con ejemplos de uso.\n"
-        "    Ejemplo: HELP\n"
-        "\n"
-        "  EXIT\n"
-        "    - Desconecta el cliente del servidor.\n"
-        "    Ejemplo: EXIT\n"
+        "  HELP                                 - Mostrar esta ayuda\n"
+        "  EXIT                                 - Desconectar del servidor\n"
         "\n"
         "NOTAS IMPORTANTES:\n"
         "- Las modificaciones requieren BEGIN TRANSACTION antes de ejecutarse\n"
@@ -758,6 +777,7 @@ char *mostrar_ayuda_detallada(void) {
         "- Use COMMIT TRANSACTION para confirmar los cambios\n"
         "- El formato CSV usa punto y coma (;) como separador\n"
     );
+    
     return ayuda;
 }
 
@@ -786,5 +806,13 @@ static void handle_termination_signal(int signum) {
         close(socket_servidor_global);
         socket_servidor_global = -1;
     }
+    // Hacer shutdown() de todos los clientes activos para que detecten EOF
+    pthread_mutex_lock(&mutex_sockets_clientes);
+    for (int i = 0; i < MAX_TOTAL_CLIENTES; ++i) {
+        if (sockets_clientes[i] > 0) {
+            shutdown(sockets_clientes[i], SHUT_RDWR);
+        }
+    }
+    pthread_mutex_unlock(&mutex_sockets_clientes);
     // NO llamar cleanup_resources() ni exit() desde aquí
 }

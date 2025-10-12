@@ -158,93 +158,63 @@ int main(int argc, char const *argv[]) {
 
     // Esto permite al cliente ser interactivo y mantenerse en un ciclo de consulta.
     while (1) {
-        printf("DB > ");
-        if (fgets(command, MAX_BUFFER_SIZE, stdin) == NULL) {
-            // Manejo de Ctrl+D o EOF
+        // Usar select para esperar datos del servidor o entrada del usuario
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(sock, &readfds);
+        FD_SET(0, &readfds); // stdin
+        int maxfd = (sock > 0 ? sock : 0);
+        int ready = select(maxfd + 1, &readfds, NULL, NULL, NULL);
+        if (ready < 0) {
+            perror("select");
             break;
         }
-
-        // Eliminar el newline al final
-        command[strcspn(command, "\n")] = 0;
-
-        if (strlen(command) == 0) continue;
-
-        if (strncmp(command, "HELP", 4) == 0) {
-            printf("\nComandos disponibles:\n");
-            printf("  BEGIN TRANSACTION: Inicia una transacción exclusiva.\n    Ejemplo: BEGIN TRANSACTION\n");
-            printf("  COMMIT TRANSACTION: Finaliza y confirma la transacción.\n    Ejemplo: COMMIT TRANSACTION\n");
-            printf("  SELECT ALL: Muestra todos los registros.\n    Ejemplo: SELECT ALL\n");
-            printf("  SELECT WHERE CAMPO=VALOR: Filtra registros por campo.\n    Ejemplo: SELECT WHERE Producto=Tablet\n");
-            printf("  INSERT id;producto;cantidad;precio: Inserta un nuevo registro.\n    Ejemplo: INSERT 100;Router;5;199.99\n");
-            printf("  UPDATE ID=<id> SET Campo=Valor: Modifica un campo de un registro.\n    Ejemplo: UPDATE ID=10 SET Precio=15.50\n");
-            printf("  DELETE ID=<id>: Elimina un registro por ID.\n    Ejemplo: DELETE ID=10\n");
-            printf("  EXIT: Desconecta y cierra el cliente.\n    Ejemplo: EXIT\n");
-            continue;
-        }
-
-        if (strncmp(command, "EXIT", 4) == 0) {
-            // Enviamos EXIT al servidor antes de terminar
-            send(sock, command, strlen(command), 0);
-            break;
-        }
-
-        // Enviar el comando al servidor
-        if (send(sock, command, strlen(command), 0) < 0) {
-            perror("Error al enviar datos");
-            break;
-        }
-
-        // Leer la respuesta del servidor (puede venir en múltiples chunks)
-        memset(buffer, 0, MAX_BUFFER_SIZE);
-        int total_received = 0;
-        int chunk_size = 0;
-        
-        // Leer el primer chunk
-        if ((chunk_size = read(sock, buffer, MAX_BUFFER_SIZE - 1)) <= 0) {
-            // Esto permite al cliente manejar el cierre inesperado del servidor (Requisito 7, 10)
-            printf("\n[ERROR] Servidor desconectado inesperadamente.\n");
-            break;
-        }
-        
-        total_received = chunk_size;
-        buffer[total_received] = '\0';
-        
-        // Verificar si hay marcador de fin de mensaje
-        if (strstr(buffer, "---END---") != NULL) {
-            // Remover el marcador de fin
-            char *end_marker = strstr(buffer, "---END---");
-            *end_marker = '\0';
-            printf("<< %s", buffer);
-        } else if (chunk_size == MAX_BUFFER_SIZE - 1) {
-            // Crear un buffer más grande para el contenido completo
-            char *full_response = (char *)malloc(MAX_BUFFER_SIZE * 4); // 16KB
-            if (full_response) {
-                memcpy(full_response, buffer, total_received);
-                
-                // Continuar leyendo chunks adicionales hasta encontrar el marcador de fin
-                while ((chunk_size = read(sock, full_response + total_received, MAX_BUFFER_SIZE - 1)) > 0) {
-                    total_received += chunk_size;
-                    full_response[total_received] = '\0';
-                    
-                    // Verificar si encontramos el marcador de fin
-                    if (strstr(full_response, "---END---") != NULL) {
-                        break;
-                    }
-                }
-                
-                // Remover el marcador de fin si existe
-                char *end_marker = strstr(full_response, "---END---");
-                if (end_marker) {
-                    *end_marker = '\0';
-                }
-                
-                printf("<< %s", full_response);
-                free(full_response);
+        // Si hay datos del servidor
+        if (FD_ISSET(sock, &readfds)) {
+            memset(buffer, 0, MAX_BUFFER_SIZE);
+            int chunk_size = read(sock, buffer, MAX_BUFFER_SIZE - 1);
+            if (chunk_size <= 0) {
+                printf("\n[INFO] El servidor cerró la conexión. Saliendo automáticamente.\n");
+                break;
+            }
+            buffer[chunk_size] = '\0';
+            if (strstr(buffer, "---END---") != NULL) {
+                char *end_marker = strstr(buffer, "---END---");
+                *end_marker = '\0';
+                printf("<< %s", buffer);
             } else {
                 printf("<< %s", buffer);
             }
-        } else {
-            printf("<< %s", buffer);
+        }
+        // Si hay entrada del usuario
+        if (FD_ISSET(0, &readfds)) {
+            printf("DB > ");
+            if (fgets(command, MAX_BUFFER_SIZE, stdin) == NULL) {
+                // Ctrl+D o EOF
+                break;
+            }
+            command[strcspn(command, "\n")] = 0;
+            if (strlen(command) == 0) continue;
+            if (strncmp(command, "HELP", 4) == 0) {
+                printf("\nComandos disponibles:\n");
+                printf("  BEGIN TRANSACTION: Inicia una transacción exclusiva.\n    Ejemplo: BEGIN TRANSACTION\n");
+                printf("  COMMIT TRANSACTION: Finaliza y confirma la transacción.\n    Ejemplo: COMMIT TRANSACTION\n");
+                printf("  SELECT ALL: Muestra todos los registros.\n    Ejemplo: SELECT ALL\n");
+                printf("  SELECT WHERE CAMPO=VALOR: Filtra registros por campo.\n    Ejemplo: SELECT WHERE Producto=Tablet\n");
+                printf("  INSERT id;producto;cantidad;precio: Inserta un nuevo registro.\n    Ejemplo: INSERT 100;Router;5;199.99\n");
+                printf("  UPDATE ID=<id> SET Campo=Valor: Modifica un campo de un registro.\n    Ejemplo: UPDATE ID=10 SET Precio=15.50\n");
+                printf("  DELETE ID=<id>: Elimina un registro por ID.\n    Ejemplo: DELETE ID=10\n");
+                printf("  EXIT: Desconecta y cierra el cliente.\n    Ejemplo: EXIT\n");
+                continue;
+            }
+            if (strncmp(command, "EXIT", 4) == 0) {
+                send(sock, command, strlen(command), 0);
+                break;
+            }
+            if (send(sock, command, strlen(command), 0) < 0) {
+                perror("Error al enviar datos");
+                break;
+            }
         }
     }
 
