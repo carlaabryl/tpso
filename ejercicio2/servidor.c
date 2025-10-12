@@ -397,30 +397,16 @@ int main(int argc, char *argv[]) {
     printf("Servidor Micro DB escuchando en %s:%d. Max concurrentes (N): %d, Backlog (M): %d.\n", ip, puerto, config_max_clientes, config_backlog);
 
     // Bucle principal: permanecer a la espera de nuevos clientes
+    int clientes_en_espera = 0;
     while (1) {
-        // Esperar hasta que haya espacio para otro cliente concurrente (N)
-        pthread_mutex_lock(&mutex_clientes);
-        while (clientes_activos >= config_max_clientes && !stop_requested) {
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_sec += 1; // despertarse cada 1 segundo para comprobar stop_requested
-            pthread_cond_timedwait(&condicion_clientes, &mutex_clientes, &ts);
-        }
-        if (stop_requested) {
-            pthread_mutex_unlock(&mutex_clientes);
-            break; // salir del bucle principal y limpiar
-        }
-        pthread_mutex_unlock(&mutex_clientes);
-
+        // Aceptar conexiones siempre, pero decidir si se atienden o se rechazan
         info_cliente *info = (info_cliente *)malloc(sizeof(info_cliente));
         if (!info) { perror("malloc failed"); continue; }
 
-        // CORRECCIÓN: llamada correcta a accept
         nuevo_socket = accept(socket_servidor, (struct sockaddr *)&info->direccion, (socklen_t *)&longitud_direccion);
 
         if (nuevo_socket < 0) {
             free(info);
-            // Si la causa fue la señal de terminación, salimos limpiamente
             if (stop_requested) {
                 break;
             }
@@ -428,11 +414,27 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        info->socket = nuevo_socket;
-        info->id_usuario = siguiente_id_usuario++; // Asignar un ID de usuario
-        printf("[Servidor] Nuevo cliente! ID: %d, Clientes activos: %d.\n", info->id_usuario, clientes_activos + 1);
+        pthread_mutex_lock(&mutex_clientes);
+        int activos = clientes_activos;
+        pthread_mutex_unlock(&mutex_clientes);
 
-        // Aumentar el contador de clientes y lanzar el hilo
+        if (activos >= config_max_clientes) {
+            // Si hay N clientes activos, verificar backlog
+            // Contar conexiones en espera (aprox):
+            // No hay forma directa de saber el backlog, así que simplemente rechazamos si ya hay N activos
+            // y el accept() nos da una conexión extra (lo que significa que backlog estaba lleno y el SO la entregó)
+            // En este punto, si llegamos aquí, el backlog está lleno
+            const char *msg = "ERROR: Servidor ocupado. Se superó el máximo de clientes y conexiones en espera. Intente más tarde.\n";
+            send(nuevo_socket, msg, strlen(msg), 0);
+            close(nuevo_socket);
+            free(info);
+            continue;
+        }
+
+        info->socket = nuevo_socket;
+        info->id_usuario = siguiente_id_usuario++;
+        printf("[Servidor] Nuevo cliente! ID: %d, Clientes activos: %d.\n", info->id_usuario, activos + 1);
+
         pthread_mutex_lock(&mutex_clientes);
         clientes_activos++;
         printf("[Servidor] Nuevo cliente! Clientes activos: %d.\n", clientes_activos);
