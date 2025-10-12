@@ -11,7 +11,7 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <math.h>
-#include <time.h> // Para usleep
+#include <time.h> // Para usleep y clock_gettime
 
 // --- Constantes y Configuración
 #define MAX_COMMAND_LENGTH 512
@@ -30,6 +30,9 @@ int descriptor_archivo_bloqueado = -1; // Descriptor del archivo bloqueado duran
 static int socket_servidor_global = -1; // socket de escucha global para cierre seguro
 static volatile int siguiente_id_usuario = 1;
 pthread_cond_t condicion_clientes; // Señaliza disponibilidad de slots de cliente
+
+/* Bandera de terminación segura desde el handler de señales */
+static volatile sig_atomic_t stop_requested = 0;
 
 // --- Prototipos
 void *handle_client(void *arg);
@@ -52,9 +55,6 @@ typedef struct {
 
 // --- Funciones de Bloqueo (Transacciones)
 
-/**
- * Esto permite al cliente iniciar una transacción y obtener un bloqueo (lock) exclusivo sobre el archivo CSV.
- */
 int try_acquire_lock(int socket_cliente) {
     int result = 0;
 
@@ -79,9 +79,6 @@ int try_acquire_lock(int socket_cliente) {
     return result;
 }
 
-/**
- * Esto permite al cliente confirmar la transaccin (COMMIT) y liberar el bloqueo exclusivo.
- */
 void release_lock(int socket_cliente) {
     pthread_mutex_lock(&mutex_estado_bloqueo);
     if (archivo_bloqueado && bloqueado_por_socket == socket_cliente) {
@@ -103,10 +100,6 @@ void release_lock(int socket_cliente) {
 
 // --- Manejo de Cliente Concurrente
 
-/**
- * Esto permite al servidor aceptar hasta N clientes concurrentes, manejando la conexin
- * de forma independiente en un thread, cumpliendo con el Requisito 1.
- */
 void *handle_client(void *arg) {
     info_cliente *info = (info_cliente *)arg;
     int socket_cliente = info->socket;
@@ -153,8 +146,6 @@ void *handle_client(void *arg) {
         }
         else if (strncmp(command, "COMMIT TRANSACTION", 18) == 0) {
             if (transaccion_activa) {
-                // Aquí iría la lógica de aplicar modificaciones si usáramos un log,
-                // pero como modificamos directamente el archivo, solo liberamos el lock.
                 release_lock(socket_cliente);
                 transaccion_activa = 0;
                 send(socket_cliente, "OK: Transaccion confirmada. Lock liberado.\n", 43, 0);
@@ -176,8 +167,6 @@ void *handle_client(void *arg) {
             } else if (!transaccion_activa) {
                 send(socket_cliente, "ERROR: Las modificaciones requieren BEGIN TRANSACTION.\n", 55, 0);
             } else {
-                // Esto permite realizar modificaciones de datos (alta, baja, modificación)
-                // de forma segura dentro de una transacción.
                 int success;
                 char *response = perform_modification(command, &success);
                 send(socket_cliente, response, strlen(response), 0);
@@ -187,9 +176,6 @@ void *handle_client(void *arg) {
 
         // --- 3. Consultas (SELECT) ---
         else if (strncmp(command, "SELECT", 6) == 0) {
-            // Las consultas no necesitan un lock exclusivo, pero s deben esperar
-            // a que NO haya una transaccin activa para asegurar datos consistentes.
-
             pthread_mutex_lock(&mutex_estado_bloqueo);
             int locked = archivo_bloqueado;
             pthread_mutex_unlock(&mutex_estado_bloqueo);
@@ -198,11 +184,9 @@ void *handle_client(void *arg) {
                  // Si hay una transacción activa, ningún otro cliente puede realizar consultas (Requisito 5)
                 send(socket_cliente, "ERROR: Transaccion activa en curso. Reintente luego.\n", 53, 0);
             } else {
-                // Esto permite al cliente realizar consultas (ej. búsquedas, filtros, etc.).
                 int success;
                 char *response = execute_query(command, &success);
-                
-                // Si es SELECT ALL y el contenido es grande, enviarlo en chunks
+
                 if (strncmp(command, "SELECT ALL", 10) == 0 && success) {
                     char *content = read_entire_file(CSV_FILE_NAME);
                     if (content) {
@@ -211,18 +195,18 @@ void *handle_client(void *arg) {
                             // Enviar en chunks de 2000 bytes
                             size_t chunk_size = 2000;
                             size_t sent = 0;
-                            
+
                             while (sent < content_len) {
                                 size_t remaining = content_len - sent;
                                 size_t current_chunk = (remaining > chunk_size) ? chunk_size : remaining;
-                                
+
                                 send(socket_cliente, content + sent, current_chunk, 0);
                                 sent += current_chunk;
-                                
+
                                 // Pequeña pausa para evitar saturar el buffer
                                 usleep(1000); // 1ms
                             }
-                            
+
                             // Enviar marcador de fin de mensaje
                             send(socket_cliente, "\n---END---\n", 11, 0);
                             free(content);
@@ -300,26 +284,18 @@ int main(int argc, char *argv[]) {
     int config_max_clientes = MAX_CLIENTS;
     int config_backlog = BACKLOG_QUEUE;
 
-    // Esto permite al servidor obtener la dirección IP, nombre de host y puerto de escucha
-    // por archivo de configuración o parámetro (en este caso, simulación simple por código).
     load_config(ip, &puerto, &config_max_clientes, &config_backlog);
 
-    // Validación de parámetros con ayuda automática
+    // Validación de parámetros (como antes)
     if (argc == 2) {
-        // Solo se proporcionó un parámetro (debería ser N M)
         fprintf(stderr, "ERROR: Parámetros incorrectos.\n");
         fprintf(stderr, "Se esperan 0, 2 o 4 parámetros, pero se proporcionó 1.\n\n");
         fprintf(stderr, "USO CORRECTO:\n");
         fprintf(stderr, "  %s                           - Valores por defecto\n", argv[0]);
         fprintf(stderr, "  %s N M                       - Configurar clientes concurrentes y backlog\n", argv[0]);
         fprintf(stderr, "  %s IP PUERTO N M             - Configurar IP, puerto, clientes y backlog\n", argv[0]);
-        fprintf(stderr, "\nEJEMPLOS:\n");
-        fprintf(stderr, "  %s\n", argv[0]);
-        fprintf(stderr, "  %s 10 20\n", argv[0]);
-        fprintf(stderr, "  %s 192.168.1.100 9090 5 10\n", argv[0]);
         exit(EXIT_FAILURE);
     } else if (argc > 5) {
-        // Demasiados parámetros
         fprintf(stderr, "ERROR: Demasiados parámetros.\n");
         fprintf(stderr, "Se proporcionaron %d parámetros, pero el máximo es 4.\n\n", argc - 1);
         fprintf(stderr, "USO CORRECTO:\n");
@@ -328,10 +304,8 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "  %s IP PUERTO N M             - Configurar IP, puerto, clientes y backlog\n", argv[0]);
         exit(EXIT_FAILURE);
     } else if (argc == 3) {
-        // Validar N y M
         config_max_clientes = atoi(argv[1]);
         config_backlog = atoi(argv[2]);
-        
         if (config_max_clientes <= 0) {
             fprintf(stderr, "ERROR: N (clientes concurrentes) debe ser mayor que 0. Valor recibido: %d\n", config_max_clientes);
             exit(EXIT_FAILURE);
@@ -341,34 +315,15 @@ int main(int argc, char *argv[]) {
             exit(EXIT_FAILURE);
         }
     } else if (argc == 5) {
-        // Validar IP, PUERTO, N y M
         strncpy(ip, argv[1], sizeof(ip) - 1);
         ip[sizeof(ip) - 1] = '\0';
         puerto = atoi(argv[2]);
         config_max_clientes = atoi(argv[3]);
         config_backlog = atoi(argv[4]);
-        
-        // Validar IP (básico)
-        if (strlen(ip) == 0) {
-            fprintf(stderr, "ERROR: Dirección IP vacía.\n");
-            exit(EXIT_FAILURE);
-        }
-        
-        // Validar puerto
-        if (puerto <= 0 || puerto > 65535) {
-            fprintf(stderr, "ERROR: Puerto inválido: %d. Debe estar entre 1 y 65535.\n", puerto);
-            exit(EXIT_FAILURE);
-        }
-        
-        // Validar N y M
-        if (config_max_clientes <= 0) {
-            fprintf(stderr, "ERROR: N (clientes concurrentes) debe ser mayor que 0. Valor recibido: %d\n", config_max_clientes);
-            exit(EXIT_FAILURE);
-        }
-        if (config_backlog < 0) {
-            fprintf(stderr, "ERROR: M (backlog) debe ser mayor o igual a 0. Valor recibido: %d\n", config_backlog);
-            exit(EXIT_FAILURE);
-        }
+        if (strlen(ip) == 0) { fprintf(stderr, "ERROR: Dirección IP vacía.\n"); exit(EXIT_FAILURE); }
+        if (puerto <= 0 || puerto > 65535) { fprintf(stderr, "ERROR: Puerto inválido: %d. Debe estar entre 1 y 65535.\n", puerto); exit(EXIT_FAILURE); }
+        if (config_max_clientes <= 0) { fprintf(stderr, "ERROR: N (clientes concurrentes) debe ser mayor que 0. Valor recibido: %d\n", config_max_clientes); exit(EXIT_FAILURE); }
+        if (config_backlog < 0) { fprintf(stderr, "ERROR: M (backlog) debe ser mayor o igual a 0. Valor recibido: %d\n", config_backlog); exit(EXIT_FAILURE); }
     }
 
     // Inicialización de mutexes
@@ -391,47 +346,52 @@ int main(int argc, char *argv[]) {
 
     int opt = 1;
     if (setsockopt(socket_servidor, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
-        perror("setsockopt");
-        exit(EXIT_FAILURE);
+        perror("setsockopt"); exit(EXIT_FAILURE);
     }
 
     direccion.sin_family = AF_INET;
     direccion.sin_addr.s_addr = inet_addr(ip);
     direccion.sin_port = htons(puerto);
 
-    // Esto permite al servidor enlazar el socket a la dirección y puerto especificados.
     if (bind(socket_servidor, (struct sockaddr *)&direccion, sizeof(direccion)) < 0) {
-        perror("bind failed");
-        exit(EXIT_FAILURE);
+        perror("bind failed"); exit(EXIT_FAILURE);
     }
 
-    // Esto permite al servidor escuchar nuevas conexiones y mantener hasta M clientes en espera (Requisito 1)
     if (listen(socket_servidor, config_backlog) < 0) {
-        perror("listen");
-        exit(EXIT_FAILURE);
+        perror("listen"); exit(EXIT_FAILURE);
     }
 
     printf("Servidor Micro DB escuchando en %s:%d. Max concurrentes (N): %d, Backlog (M): %d.\n", ip, puerto, config_max_clientes, config_backlog);
 
     // Bucle principal: permanecer a la espera de nuevos clientes
-    // Esto permite al servidor permanecer a la espera de nuevos clientes luego que todos los clientes
-    // se desconectaron, sin terminar por sus propios medios (Requisito 6).
     while (1) {
         // Esperar hasta que haya espacio para otro cliente concurrente (N)
         pthread_mutex_lock(&mutex_clientes);
-        while (clientes_activos >= config_max_clientes) {
-            pthread_cond_wait(&condicion_clientes, &mutex_clientes);
+        while (clientes_activos >= config_max_clientes && !stop_requested) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += 1; // despertarse cada 1 segundo para comprobar stop_requested
+            pthread_cond_timedwait(&condicion_clientes, &mutex_clientes, &ts);
+        }
+        if (stop_requested) {
+            pthread_mutex_unlock(&mutex_clientes);
+            break; // salir del bucle principal y limpiar
         }
         pthread_mutex_unlock(&mutex_clientes);
 
         info_cliente *info = (info_cliente *)malloc(sizeof(info_cliente));
         if (!info) { perror("malloc failed"); continue; }
 
-        nuevo_socket = accept(socket_servidor, (struct sockaddr *)&info->direccion, (socklen_t*)&longitud_direccion);
+        // CORRECCIÓN: llamada correcta a accept
+        nuevo_socket = accept(socket_servidor, (struct sockaddr *)&info->direccion, (socklen_t *)&longitud_direccion);
 
         if (nuevo_socket < 0) {
-            perror("accept");
             free(info);
+            // Si la causa fue la señal de terminación, salimos limpiamente
+            if (stop_requested) {
+                break;
+            }
+            perror("accept");
             continue;
         }
 
@@ -446,7 +406,6 @@ int main(int argc, char *argv[]) {
         pthread_mutex_unlock(&mutex_clientes);
 
         pthread_t hilo_cliente;
-        // Lanzamos un hilo para manejar al cliente de forma concurrente
         if (pthread_create(&hilo_cliente, NULL, handle_client, (void *)info) != 0) {
             perror("pthread_create failed");
             close(nuevo_socket);
@@ -456,13 +415,13 @@ int main(int argc, char *argv[]) {
             pthread_cond_signal(&condicion_clientes);
             pthread_mutex_unlock(&mutex_clientes);
         } else {
-            // Esto permite al thread del cliente desvincularse del hilo principal
-            // para que sus recursos se limpien automáticamente al terminar.
             pthread_detach(hilo_cliente);
         }
     }
 
-    // El servidor nunca debe llegar aquí en ejecución normal
+    // Salimos del while principal => stop_requested o error terminal
+    printf("[Servidor] Señal de terminación recibida o error. Limpiando recursos...\n");
+    cleanup_resources();
     return 0;
 }
 
@@ -488,7 +447,6 @@ static void ltrim_inplace(char **ps) {
 }
 
 static int parse_record_line(const char *line, Registro *rec) {
-    // Expect: ID;Producto;Cantidad;Precio
     char copy[512];
     strncpy(copy, line, sizeof(copy) - 1);
     copy[sizeof(copy) - 1] = '\0';
@@ -498,13 +456,9 @@ static int parse_record_line(const char *line, Registro *rec) {
     if (strncmp(p, "ID;", 3) == 0) return 0; // header
 
     char *tok;
-    // ID
     tok = strtok(p, ";"); if (!tok) return -1; rec->id = atoi(tok);
-    // Producto
     tok = strtok(NULL, ";"); if (!tok) return -1; strncpy(rec->producto, tok, sizeof(rec->producto) - 1); rec->producto[sizeof(rec->producto)-1] = '\0';
-    // Cantidad
     tok = strtok(NULL, ";"); if (!tok) return -1; rec->cantidad = atoi(tok);
-    // Precio
     tok = strtok(NULL, ";"); if (!tok) return -1; rec->precio = atof(tok);
     return 1;
 }
@@ -514,7 +468,6 @@ static void record_to_csv(const Registro *rec, char *out, size_t out_size) {
 }
 
 void load_config(char *ip, int *puerto, int *max_clientes, int *backlog) {
-    // Implementación simple: carga desde constantes.
     strcpy(ip, "127.0.0.1");
     *puerto = 8080;
     *max_clientes = MAX_CLIENTS;
@@ -546,12 +499,8 @@ static int write_all_text(const char *path, const char *text) {
 }
 
 char *execute_query(const char *command, int *is_success) {
-    // Soporta:
-    //  - SELECT ALL
-    //  - SELECT WHERE CAMPO=VALOR  (CAMPO: ID, Producto, Cantidad, Precio)
     *is_success = 0;
 
-    // Copia editable
     char cmd[MAX_COMMAND_LENGTH];
     strncpy(cmd, command, sizeof(cmd) - 1);
     cmd[sizeof(cmd) - 1] = '\0';
@@ -564,22 +513,18 @@ char *execute_query(const char *command, int *is_success) {
             strcpy(err, "ERROR: No se pudo leer el CSV.\n");
             return err;
         }
-        
-        // Si el contenido es muy grande, enviarlo en chunks
         size_t content_len = strlen(content);
-        if (content_len > 3000) { // Si es mayor a 3KB, usar chunking
+        if (content_len > 3000) {
             char *chunk_response = (char *)malloc(100);
             snprintf(chunk_response, 100, "OK: Contenido grande (%zu bytes). Enviando en chunks...\n", content_len);
             *is_success = 1;
             return chunk_response;
         }
-        
         *is_success = 1;
         return content;
     }
 
     if (strncmp(pcmd, "SELECT WHERE", 12) == 0) {
-        // Parse: SELECT WHERE CAMPO=VALOR
         char *cond = pcmd + 12;
         ltrim_inplace(&cond);
         char field[32] = {0};
@@ -589,8 +534,6 @@ char *execute_query(const char *command, int *is_success) {
             strcpy(err, "ERROR: Formato de WHERE invalido.\n");
             return err;
         }
-
-        // Quitar posibles comillas simples/dobles
         size_t vlen = strlen(value);
         if ((vlen >= 2) && ((value[0] == '"' && value[vlen-1] == '"') || (value[0] == '\'' && value[vlen-1] == '\''))) {
             value[vlen-1] = '\0';
@@ -613,7 +556,6 @@ char *execute_query(const char *command, int *is_success) {
         while (fgets(line, sizeof(line), f)) {
             Registro r; int pr = parse_record_line(line, &r);
             if (pr <= 0) {
-                // header u vaco; incluir header siempre
                 if (strncmp(line, "ID;", 3) == 0) {
                     size_t l = strlen(line); if (len + l + 1 > cap) { cap *= 2; out = (char *)realloc(out, cap); }
                     memcpy(out + len, line, l); len += l; out[len] = '\0';
@@ -641,7 +583,6 @@ char *execute_query(const char *command, int *is_success) {
         }
         fclose(f);
         if (len == 0) {
-            // Sin resultados (ni header encontrado); devolver mensaje vaco amigable
             char *msg = (char *)malloc(32); strcpy(msg, "OK: 0 filas.\n"); *is_success = 1; return msg;
         }
     *is_success = 1;
@@ -654,10 +595,6 @@ char *execute_query(const char *command, int *is_success) {
 }
 
 char *perform_modification(const char *command, int *is_success) {
-    // Soporta:
-    //  - INSERT id;productoo;cantidad;precio
-    //  - UPDATE ID=<id> SET Campo=Valor
-    //  - DELETE ID=<id>
     *is_success = 0;
 
     char cmd[MAX_COMMAND_LENGTH];
@@ -666,10 +603,8 @@ char *perform_modification(const char *command, int *is_success) {
     char *pcmd = cmd; ltrim_inplace(&pcmd);
 
     if (strncmp(pcmd, "INSERT", 6) == 0) {
-        // INSERT id;productoo;cantidad;precio
         char *args = pcmd + 6; ltrim_inplace(&args);
         int id, qty; double precio; char prod[128];
-        // Producto no contiene punto y coma en este dataset, asumimos sin comillas
         if (sscanf(args, "%d;%127[^;];%d;%lf", &id, prod, &qty, &precio) != 4) {
             char *e = (char *)malloc(64); strcpy(e, "ERROR: Formato INSERT invalido.\n"); return e;
         }
@@ -682,7 +617,6 @@ char *perform_modification(const char *command, int *is_success) {
     }
 
     if (strncmp(pcmd, "UPDATE", 6) == 0) {
-        // UPDATE ID=<id> SET Campo=Valor
         int id; char field[32]; char value[128];
         if (sscanf(pcmd, "UPDATE ID=%d SET %31[^=]=%127s", &id, field, value) != 3) {
             char *e = (char *)malloc(64); strcpy(e, "ERROR: Formato UPDATE invalido.\n"); return e;
@@ -696,7 +630,6 @@ char *perform_modification(const char *command, int *is_success) {
         FILE *f = fopen(CSV_FILE_NAME, "r");
         if (!f) { char *e = (char *)malloc(64); strcpy(e, "ERROR: No se pudo abrir el CSV.\n"); return e; }
 
-        // Construir nuevo contenido
         size_t cap = 1024; size_t len = 0; int updated = 0;
         char *out = (char *)malloc(cap); if (!out) { fclose(f); char *e = (char *)malloc(64); strcpy(e, "ERROR: Memoria insuficiente.\n"); return e; }
         out[0] = '\0';
@@ -721,7 +654,6 @@ char *perform_modification(const char *command, int *is_success) {
                 memcpy(out + len, buf, l); len += l; out[len] = '\0';
                 updated = 1; continue;
             }
-            // Copiar tal cual
             size_t l = strlen(line); if (len + l + 1 > cap) { cap = (cap + l) * 2; out = (char *)realloc(out, cap); }
             memcpy(out + len, line, l); len += l; out[len] = '\0';
         }
@@ -735,7 +667,6 @@ char *perform_modification(const char *command, int *is_success) {
     }
 
     if (strncmp(pcmd, "DELETE", 6) == 0) {
-        // DELETE ID=<id>
         int id;
         if (sscanf(pcmd, "DELETE ID=%d", &id) != 1) {
             char *e = (char *)malloc(64); strcpy(e, "ERROR: Formato DELETE invalido.\n"); return e;
@@ -836,7 +767,11 @@ static void cleanup_resources(void) {
 }
 
 static void handle_termination_signal(int signum) {
-    // Limpieza centralizada y salida
-    cleanup_resources();
-    exit(0);
+    // Handler minimal: marcar flag y cerrar socket de escucha (close es async-signal-safe)
+    stop_requested = 1;
+    if (socket_servidor_global >= 0) {
+        close(socket_servidor_global);
+        socket_servidor_global = -1;
+    }
+    // NO llamar cleanup_resources() ni exit() desde aquí
 }

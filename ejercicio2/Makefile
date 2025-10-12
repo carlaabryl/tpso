@@ -80,7 +80,7 @@ clean-all: clean
 help:
 	@echo "=== MAKEFILE MICRO DB ==="
 	@echo ""
-	@echo "Comandos disponibles:"
+	@echo "Comandos de compilación:"
 	@echo "  make all        - Compilar servidor y cliente"
 	@echo "  make servidor   - Compilar solo el servidor"
 	@echo "  make cliente    - Compilar solo el cliente"
@@ -88,11 +88,26 @@ help:
 	@echo "  make setup      - Compilar todo y crear CSV"
 	@echo "  make clean      - Eliminar ejecutables"
 	@echo "  make clean-all  - Eliminar ejecutables y CSV"
-	@echo "  make help       - Mostrar esta ayuda"
+	@echo ""
+	@echo "Comandos de ejecución:"
+	@echo "  make run-servidor        - Ejecutar servidor con parámetros por defecto"
+	@echo "  make run-servidor-simple - Ejecutar servidor solo con N y M"
+	@echo "  make run-cliente         - Ejecutar cliente con IP y puerto específicos"
+	@echo "  make run-cliente-local   - Ejecutar cliente conectando a localhost"
+	@echo ""
+	@echo "Ejemplos de configuración:"
+	@echo "  make run-servidor-3-10   - Servidor con 3 clientes concurrentes y 10 en espera"
+	@echo "  make run-servidor-10-20 - Servidor con 10 clientes concurrentes y 20 en espera"
+	@echo "  make run-servidor-20-50 - Servidor con 20 clientes concurrentes y 50 en espera"
+	@echo ""
+	@echo "Parámetros personalizados:"
+	@echo "  make run-servidor N=15 M=30        - Servidor con N=15 y M=30"
+	@echo "  make run-servidor IP=192.168.1.100 PUERTO=9090 N=8 M=20"
 	@echo ""
 	@echo "Ejemplos de uso:"
-	@echo "  make setup      # Configuración inicial completa"
-	@echo "  make clean      # Limpiar después de compilar"
+	@echo "  make setup              # Configuración inicial completa"
+	@echo "  make run-servidor-3-10  # Ejecutar con configuración específica"
+	@echo "  make clean              # Limpiar después de compilar"
 	@echo ""
 
 # Reglas adicionales para compilar individualmente
@@ -111,5 +126,45 @@ info:
 	@echo "Arquitectura: $(shell uname -m)"
 	@echo ""
 
+# Variables para parámetros del servidor (pueden ser sobrescritas)
+SERVIDOR_N ?= 5
+SERVIDOR_M ?= 5
+SERVIDOR_IP ?= 127.0.0.1
+SERVIDOR_PUERTO ?= 8080
+
+# Ejecutar servidor con parámetros por defecto
+run-servidor: $(SERVIDOR_EXE) csv
+	@echo "Ejecutando servidor con parámetros por defecto..."
+	@echo "IP: $(SERVIDOR_IP), Puerto: $(SERVIDOR_PUERTO), N: $(SERVIDOR_N), M: $(SERVIDOR_M)"
+	./$(SERVIDOR_EXE) $(SERVIDOR_IP) $(SERVIDOR_PUERTO) $(SERVIDOR_N) $(SERVIDOR_M)
+
+# Ejecutar servidor solo con N y M
+run-servidor-simple: $(SERVIDOR_EXE) csv
+	@echo "Ejecutando servidor con N=$(SERVIDOR_N) y M=$(SERVIDOR_M)..."
+	./$(SERVIDOR_EXE) $(SERVIDOR_N) $(SERVIDOR_M)
+
+# Ejecutar cliente
+run-cliente: $(CLIENTE_EXE)
+	@echo "Ejecutando cliente conectando a $(SERVIDOR_IP):$(SERVIDOR_PUERTO)..."
+	./$(CLIENTE_EXE) $(SERVIDOR_IP) $(SERVIDOR_PUERTO)
+
+# Ejecutar cliente con servidor local
+run-cliente-local: $(CLIENTE_EXE)
+	@echo "Ejecutando cliente conectando a servidor local..."
+	./$(CLIENTE_EXE)
+
+# Ejemplos de configuración
+run-servidor-3-10: $(SERVIDOR_EXE) csv
+	@echo "Ejecutando servidor con 3 clientes concurrentes y 10 en espera..."
+	./$(SERVIDOR_EXE) 3 10
+
+run-servidor-10-20: $(SERVIDOR_EXE) csv
+	@echo "Ejecutando servidor con 10 clientes concurrentes y 20 en espera..."
+	./$(SERVIDOR_EXE) 10 20
+
+run-servidor-20-50: $(SERVIDOR_EXE) csv
+	@echo "Ejecutando servidor con 20 clientes concurrentes y 50 en espera..."
+	./$(SERVIDOR_EXE) 20 50
+
 # Marcar reglas como no archivos
-.PHONY: all clean clean-all help setup csv servidor cliente info
+.PHONY: all clean clean-all help setup csv servidor cliente info run-servidor run-servidor-simple run-cliente run-cliente-local run-servidor-3-10 run-servidor-10-20 run-servidor-20-50

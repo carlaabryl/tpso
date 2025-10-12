@@ -5,6 +5,9 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <signal.h>
+#include <pthread.h>
+#include <errno.h>
+#include <fcntl.h>
 
 #define MAX_BUFFER_SIZE 4096
 
@@ -100,11 +103,47 @@ int main(int argc, char const *argv[]) {
         return 1;
     }
 
-    // Conexi�n
-    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        perror("Error de conexion al Servidor");
+    // Conexión con timeout de 3 segundos
+    // 1. Poner el socket en modo no bloqueante
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
+    int res = connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr));
+    if (res < 0 && errno != EINPROGRESS) {
+        if (errno == ECONNREFUSED || errno == EAGAIN || errno == EWOULDBLOCK) {
+            fprintf(stderr, "[ERROR] No se pudo conectar: se superó el máximo de clientes en espera o el servidor no acepta más conexiones. Intente más tarde.\n");
+        } else {
+            perror("Error de conexion al Servidor");
+        }
         return 1;
     }
+
+    if (res < 0 && errno == EINPROGRESS) {
+        // Esperar hasta 3 segundos a que se conecte
+        fd_set wfds;
+        struct timeval tv;
+        FD_ZERO(&wfds);
+        FD_SET(sock, &wfds);
+        tv.tv_sec = 3;
+        tv.tv_usec = 0;
+        int sel = select(sock + 1, NULL, &wfds, NULL, &tv);
+        if (sel <= 0) {
+            fprintf(stderr, "[ERROR] No se pudo conectar: timeout de conexión (posible máximo de clientes en espera alcanzado).\n");
+            close(sock);
+            return 1;
+        }
+        int so_error = 0;
+        socklen_t len = sizeof(so_error);
+        getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
+        if (so_error != 0) {
+            fprintf(stderr, "[ERROR] No se pudo conectar: %s\n", strerror(so_error));
+            close(sock);
+            return 1;
+        }
+    }
+
+    // Volver a modo bloqueante
+    fcntl(sock, F_SETFL, flags);
 
     printf("\n*** Micro DB Cliente ***\n");
     printf("Conectado a %s:%d (Socket %d).\n", ip, puerto, sock);
@@ -131,7 +170,15 @@ int main(int argc, char const *argv[]) {
         if (strlen(command) == 0) continue;
 
         if (strncmp(command, "HELP", 4) == 0) {
-            printf("Comandos: BEGIN TRANSACTION, COMMIT TRANSACTION, SELECT, INSERT, UPDATE, DELETE, EXIT\n");
+            printf("\nComandos disponibles:\n");
+            printf("  BEGIN TRANSACTION: Inicia una transacción exclusiva.\n    Ejemplo: BEGIN TRANSACTION\n");
+            printf("  COMMIT TRANSACTION: Finaliza y confirma la transacción.\n    Ejemplo: COMMIT TRANSACTION\n");
+            printf("  SELECT ALL: Muestra todos los registros.\n    Ejemplo: SELECT ALL\n");
+            printf("  SELECT WHERE CAMPO=VALOR: Filtra registros por campo.\n    Ejemplo: SELECT WHERE Producto=Tablet\n");
+            printf("  INSERT id;producto;cantidad;precio: Inserta un nuevo registro.\n    Ejemplo: INSERT 100;Router;5;199.99\n");
+            printf("  UPDATE ID=<id> SET Campo=Valor: Modifica un campo de un registro.\n    Ejemplo: UPDATE ID=10 SET Precio=15.50\n");
+            printf("  DELETE ID=<id>: Elimina un registro por ID.\n    Ejemplo: DELETE ID=10\n");
+            printf("  EXIT: Desconecta y cierra el cliente.\n    Ejemplo: EXIT\n");
             continue;
         }
 

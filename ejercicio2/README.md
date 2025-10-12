@@ -140,11 +140,51 @@ SELECT WHERE Cantidad>20
 SELECT WHERE Precio<100
 ```
 
+### Sistema de cola de espera
+
+Cuando el servidor alcanza el límite de N clientes concurrentes, los nuevos clientes se colocan automáticamente en una cola de espera:
+
+#### Comportamiento de la cola:
+- **Mensaje informativo**: Los clientes en cola reciben un mensaje como:
+  ```
+  INFO: Servidor ocupado. Usted es el cliente 3 en la cola de espera (posición 2 de 5). Por favor espere...
+  ```
+- **Posición en cola**: Se muestra el ID del cliente, su posición actual y el límite máximo
+- **Activación automática**: Cuando un cliente activo se desconecta, el siguiente en cola se activa automáticamente
+- **Mensaje de bienvenida**: Al activarse, el cliente recibe:
+  ```
+  Bienvenido. Usted es el Usuario 3. Ahora está conectado activamente. Use HELP para ayuda.
+  ```
+
+#### Ejemplo de uso:
+```bash
+# Servidor con solo 2 clientes concurrentes
+./servidor 2 10
+
+# Terminal 1: Cliente 1 (activo)
+./cliente
+
+# Terminal 2: Cliente 2 (activo)  
+./cliente
+
+# Terminal 3: Cliente 3 (en cola)
+./cliente
+# Recibe: "INFO: Servidor ocupado. Usted es el cliente 3 en la cola de espera (posición 1 de 2). Por favor espere..."
+
+# Terminal 4: Cliente 4 (en cola)
+./cliente  
+# Recibe: "INFO: Servidor ocupado. Usted es el cliente 4 en la cola de espera (posición 2 de 2). Por favor espere..."
+
+# Si Cliente 1 se desconecta, Cliente 3 se activa automáticamente
+```
+
 ### Características técnicas
 
 #### Manejo de concurrencia
 - El servidor maneja hasta N clientes concurrentes usando pthreads
 - Cada cliente se ejecuta en un hilo independiente
+- **Sistema de cola de espera**: Los clientes que excedan el límite N se colocan en cola
+- Los clientes en cola reciben mensajes informativos sobre su posición
 - Sistema de bloqueo exclusivo para transacciones usando `flock()`
 - Durante una transacción activa, otros clientes no pueden realizar operaciones
 
@@ -160,6 +200,8 @@ SELECT WHERE Precio<100
 - Gestión eficiente de memoria con realloc dinámico
 
 ### Comandos del Makefile
+
+#### Compilación
 ```bash
 make setup      # Compilar todo y crear CSV de ejemplo
 make all        # Compilar servidor y cliente
@@ -170,6 +212,45 @@ make clean      # Eliminar ejecutables
 make clean-all  # Eliminar ejecutables y CSV
 make help       # Mostrar ayuda del Makefile
 make info       # Mostrar información del sistema
+```
+
+#### Ejecución con parámetros
+```bash
+# Ejecutar servidor con parámetros por defecto (N=5, M=5)
+make run-servidor
+
+# Ejecutar servidor solo con N y M
+make run-servidor-simple
+
+# Ejecutar cliente conectando a servidor local
+make run-cliente-local
+
+# Ejecutar cliente con IP y puerto específicos
+make run-cliente
+```
+
+#### Configuraciones predefinidas
+```bash
+# Servidor con 3 clientes concurrentes y 10 en espera
+make run-servidor-3-10
+
+# Servidor con 10 clientes concurrentes y 20 en espera
+make run-servidor-10-20
+
+# Servidor con 20 clientes concurrentes y 50 en espera
+make run-servidor-20-50
+```
+
+#### Parámetros personalizados
+```bash
+# Cambiar N y M
+make run-servidor N=15 M=30
+
+# Cambiar IP, puerto, N y M
+make run-servidor IP=192.168.1.100 PUERTO=9090 N=8 M=20
+
+# Solo cambiar N y M para run-servidor-simple
+make run-servidor-simple N=12 M=25
 ```
 
 ### Notas adicionales
