@@ -1,3 +1,4 @@
+#define _XOPEN_SOURCE 500   // Necesario para que usleep y otras funciones estén disponibles
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -8,7 +9,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <string.h>
-#include <signal.h>
+#include <signal.h>    
 #include <errno.h>
 
 // --- Constantes
@@ -81,6 +82,8 @@ void proceso_coordinador(int id_shm, int id_sem, int cantidad_generadores, int t
 void proceso_generador(int id_shm, int id_sem, int id_generador);
 void sem_esperar(int id_sem, int indice_sem);
 void sem_senalizar(int id_sem, int indice_sem);
+void mostrar_ayuda(const char *nombre_programa);
+int validar_parametro(const char *parametro, const char *nombre_parametro);
 
 // Indices para el conjunto de semáforos
 #define SEM_ASIGNACION_ID 0  // Para proteger 'proximo_id_a_asignar' (Coordinador)
@@ -318,8 +321,8 @@ void proceso_coordinador(int id_shm, int id_sem, int cantidad_generadores, int t
     }
 
     // Esperar a que todos los procesos generadores terminen
-    int status;
-    // while ((wait(&status)) > 0); // Este bucle ya está manejado por handle_sigchld
+    // El recolección de hijos se realiza en el manejador SIGCHLD (manejador_sigchld).
+    // Si fuese necesario esperar manualmente, se podría usar un bucle wait() aquí.
 
     printf("[Coordinador] Todos los Generadores terminaron. Limpiando IPC.\n");
 
@@ -329,20 +332,87 @@ void proceso_coordinador(int id_shm, int id_sem, int cantidad_generadores, int t
     semctl(id_sem, 0, IPC_RMID);    // Eliminar el conjunto de semforos
 }
 
+// --- Funciones de validación y ayuda
+void mostrar_ayuda(const char *nombre_programa) {
+    printf("=== GENERADOR DE DATOS ===\n");
+    printf("Uso: %s <num_generadores> <total_registros>\n\n", nombre_programa);
+    printf("Parámetros:\n");
+    printf("  num_generadores  : Número entero positivo de procesos generadores a crear\n");
+    printf("  total_registros  : Número entero positivo de registros totales a generar\n\n");
+    printf("Ejemplos de uso válido:\n");
+    printf("  %s 3 100\n", nombre_programa);
+    printf("  %s 5 1000\n", nombre_programa);
+    printf("  %s 1 50\n\n", nombre_programa);
+    printf("Restricciones:\n");
+    printf("  - Ambos parámetros deben ser números enteros positivos\n");
+    printf("  - No se permiten números negativos, flotantes o cadenas de texto\n");
+    printf("  - El número de generadores debe ser mayor a 0\n");
+    printf("  - El total de registros debe ser mayor a 0\n\n");
+    printf("El programa generará un archivo CSV con los registros producidos.\n");
+}
+
+int validar_parametro(const char *parametro, const char *nombre_parametro) {
+    // Verificar que el parámetro no sea NULL o vacío
+    if (parametro == NULL || strlen(parametro) == 0) {
+        printf("Error: El parámetro '%s' no puede estar vacío.\n", nombre_parametro);
+        return 0;
+    }
+    
+    // Verificar que todos los caracteres sean dígitos
+    for (int i = 0; parametro[i] != '\0'; i++) {
+        if (parametro[i] < '0' || parametro[i] > '9') {
+            printf("Error: El parámetro '%s' debe ser un número entero positivo.\n", nombre_parametro);
+            printf("       Valor recibido: '%s'\n", parametro);
+            printf("       Los números flotantes, negativos y cadenas de texto no son válidos.\n");
+            return 0;
+        }
+    }
+    
+    // Convertir a entero y verificar que sea positivo
+    int valor = atoi(parametro);
+    if (valor <= 0) {
+        printf("Error: El parámetro '%s' debe ser un número entero positivo mayor a 0.\n", nombre_parametro);
+        printf("       Valor recibido: %d\n", valor);
+        return 0;
+    }
+    
+    return 1;
+}
+
 // --- MAIN
 int main(int argc, char *argv[]) {
     if (argc != 3) {
         // Esto permite al programa especificar por par�metro la cantidad de procesos generadores y
         // la cantidad total de registros a generar, cumpliendo con el requisito.
-        fprintf(stderr, "Uso: %s <num_generadores> <total_registros>\n", argv[0]);
+        printf("Error: Número incorrecto de parámetros.\n");
+        printf("Se esperaban 2 parámetros, se recibieron %d.\n\n", argc - 1);
+        mostrar_ayuda(argv[0]);
         return 1;
     }
 
+    // Validar primer parámetro (num_generadores)
+    if (!validar_parametro(argv[1], "num_generadores")) {
+        printf("\n");
+        mostrar_ayuda(argv[0]);
+        return 1;
+    }
+
+    // Validar segundo parámetro (total_registros)
+    if (!validar_parametro(argv[2], "total_registros")) {
+        printf("\n");
+        mostrar_ayuda(argv[0]);
+        return 1;
+    }
+
+    // Convertir parámetros validados a enteros
     int cantidad_generadores = atoi(argv[1]);
     int total_registros = atoi(argv[2]);
 
+    // Verificación adicional (aunque ya validamos en validar_parametro)
     if (cantidad_generadores <= 0 || total_registros <= 0) {
-        fprintf(stderr, "Ambos valores deben ser positivos.\n");
+        printf("Error: Los parámetros deben ser números enteros positivos.\n");
+        printf("num_generadores: %d, total_registros: %d\n\n", cantidad_generadores, total_registros);
+        mostrar_ayuda(argv[0]);
         return 1;
     }
 
